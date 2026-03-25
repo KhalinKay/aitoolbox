@@ -462,7 +462,7 @@ function generateSpeech() {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = speed;
 
-    // Match selected voice with proper gender detection from voice names
+    // Match selected voice: accent-normalised gender scoring + quality ranking
     const voices = window.speechSynthesis.getVoices();
     const langMap = {
         'English (US) - Female': { lang: 'en-US', gender: 'female' },
@@ -474,16 +474,20 @@ function generateSpeech() {
         'German - Male':         { lang: 'de',    gender: 'male' },
         'Japanese - Female':     { lang: 'ja',    gender: 'female' }
     };
-    // Voice names associated with each gender across OSes/browsers
+    const deaccent = s => s.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
     const femaleNames = ['female','woman','girl','zira','hazel','susan','karen',
         'victoria','samantha','moira','fiona','nicky','aria','jenny','sara','jane',
-        'siri','cortana','elvira','lucia','monica','paulina','sabina','camila',
+        'siri','cortana','elvira','lucia','helena','laura','isabel','carmen',
+        'paloma','pilar','raquel','lola','mia','rosa','sofia','julia','silvia',
+        'beatriz','esther','nuria','ines','monica','paulina','sabina','camila',
         'conchita','amelie','hortense','anna','lekha','mei-jia','sin-ji','kyoko',
-        'mizuki','yuna','heami','naayf','zeynep','filiz','yelda'];
-    const maleNames   = ['male','man','guy','david','mark','george','rishi',
+        'mizuki','yuna','heami','naayf','zeynep','filiz','yelda',
+        'ivy','joanna','kendra','kimberly','salli','nicole','emma','amy',
+        'olivia','kate','tessa','naja','helle','ioana','haruka','ayumi','nanami'];
+    const maleNames = ['male','man','guy','david','mark','george','rishi',
         'daniel','james','alex','tom','fred','junior','jorge','enrique','diego',
-        'pablo','carlos','thomas','otto','yannick','luca','takeshi','ichiro',
-        'kangkang','zhiwei','huihui'];
+        'pablo','carlos','antonio','miguel','thomas','otto','yannick','luca',
+        'takeshi','ichiro','kangkang','zhiwei','huihui','matthew','brian','joey'];
 
     const target = langMap[voiceSelect];
     if (target) {
@@ -491,14 +495,20 @@ function generateSpeech() {
         const langMatch = v => target.lang.includes('-')
             ? v.lang === target.lang
             : v.lang.startsWith(target.lang);
-        const genderKeywords = target.gender === 'female' ? femaleNames : maleNames;
-        // 1st pass: language + gender name match
-        let matched = voices.find(v =>
-            langMatch(v) && genderKeywords.some(k => v.name.toLowerCase().includes(k))
-        );
-        // 2nd pass: language only (best available)
-        if (!matched) matched = voices.find(v => langMatch(v));
-        if (matched) utterance.voice = matched;
+        const wantFemale = target.gender === 'female';
+        const seekNames = wantFemale ? femaleNames : maleNames;
+        const avoidNames = wantFemale ? maleNames : femaleNames;
+        const langVoices = voices.filter(v => langMatch(v));
+        // Score: gender (0=match,1=unknown,2=wrong) × 4  +  quality (0=neural/premium,1=normal)
+        const scored = langVoices.map(v => {
+            const n = deaccent(v.name);
+            const quality = /neural|premium|natural|enhanced/i.test(v.name) ? 0 : 1;
+            const genderScore = seekNames.some(k => n.includes(deaccent(k))) ? 0
+                              : avoidNames.some(k => n.includes(deaccent(k))) ? 2 : 1;
+            return { voice: v, score: genderScore * 4 + quality };
+        });
+        scored.sort((a, b) => a.score - b.score);
+        if (scored.length > 0) utterance.voice = scored[0].voice;
     }
 
     utterance.onstart = () => {
@@ -609,9 +619,9 @@ function downloadQR() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BACKGROUND REMOVER — @imgly/background-removal (ONNX AI, fully in-browser)
+// BACKGROUND REMOVER — @xenova/transformers + RMBG-1.4 (ONNX, fully in-browser)
 // ═══════════════════════════════════════════════════════════════════════════════
-const IMGLY_CDN = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/dist/';
+const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
 
 async function processBackground() {
     const bgInput = document.getElementById('bgInput');
@@ -626,7 +636,7 @@ async function processBackground() {
 
     btn.disabled = true;
     statusBox.style.display = 'block';
-    statusText.textContent = '⏳ Loading AI model… (first run ~10MB, cached after)';
+    statusText.textContent = '⏳ Loading AI model… (first run ~44MB, instant on repeat visits)';
     progressBar.style.width = '0%';
     document.getElementById('bgResult').style.display = 'none';
     currentBgRemovedBlob = null;
@@ -634,29 +644,69 @@ async function processBackground() {
     const file = bgInput.files[0];
 
     try {
-        // Dynamically import the AI background removal library from CDN
-        const { removeBackground } = await import(IMGLY_CDN + 'background-removal.js');
+        const { AutoModel, AutoProcessor, RawImage, env } = await import(TRANSFORMERS_CDN);
+        env.allowRemoteModels = true;
+        env.allowLocalModels = false;
 
-        statusText.textContent = '🤖 AI processing… this may take 10–30 seconds';
-        progressBar.style.width = '20%';
-
-        const resultBlob = await removeBackground(file, {
-            publicPath: IMGLY_CDN,
-            model: 'medium',
-            output: { format: 'image/png', quality: 0.9 },
-            progress: (key, current, total) => {
-                if (total > 0) {
-                    const pct = Math.min(95, Math.round((current / total) * 80) + 15);
-                    progressBar.style.width = pct + '%';
-                    if (key.startsWith('fetch')) {
-                        statusText.textContent = `⬇ Downloading model: ${Math.round(current/1024)}KB / ${Math.round(total/1024)}KB`;
-                    } else {
-                        statusText.textContent = `🤖 Running AI segmentation: ${pct}%`;
-                    }
-                }
+        progressBar.style.width = '10%';
+        const onProgress = (p) => {
+            if (p.status === 'downloading') {
+                const pct = Math.min(65, 10 + Math.round((p.loaded / (p.total || p.loaded * 2)) * 55));
+                progressBar.style.width = pct + '%';
+                statusText.textContent = `⬇ Downloading AI model: ${(p.loaded / 1048576).toFixed(1)}MB…`;
+            } else if (p.status === 'loading') {
+                progressBar.style.width = '70%';
+                statusText.textContent = '⚙ Initialising AI…';
             }
-        });
+        };
 
+        const [model, processor] = await Promise.all([
+            AutoModel.from_pretrained('briaai/RMBG-1.4', {
+                config: { model_type: 'custom' },
+                quantized: true,
+                progress_callback: onProgress
+            }),
+            AutoProcessor.from_pretrained('briaai/RMBG-1.4', {
+                config: {
+                    do_normalize: true, do_pad: false, do_rescale: true, do_resize: true,
+                    image_mean: [0.5, 0.5, 0.5], image_std: [1, 1, 1],
+                    resample: 2, rescale_factor: 0.00392156862745098,
+                    size: { width: 1024, height: 1024 }
+                }
+            })
+        ]);
+
+        statusText.textContent = '🤖 Running AI segmentation…';
+        progressBar.style.width = '75%';
+
+        const imageURL = URL.createObjectURL(file);
+        const image = await RawImage.fromURL(imageURL);
+        URL.revokeObjectURL(imageURL);
+
+        const { pixel_values } = await processor(image);
+        const { output } = await model({ input: pixel_values });
+
+        // Scale the mask back to original image dimensions
+        const mask = await RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(image.width, image.height);
+
+        progressBar.style.width = '90%';
+        statusText.textContent = '🎨 Compositing…';
+
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const ctx = canvas.getContext('2d');
+        const bitmap = await createImageBitmap(file);
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < mask.data.length; i++) {
+            imgData.data[4 * i + 3] = mask.data[i];
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        const resultBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 1.0));
         currentBgRemovedBlob = resultBlob;
         const url = URL.createObjectURL(resultBlob);
         document.getElementById('bgRemoved').src = url;
@@ -667,7 +717,7 @@ async function processBackground() {
         setTimeout(() => { statusBox.style.display = 'none'; statusText.style.color = ''; }, 2000);
     } catch (err) {
         console.error('AI background removal error:', err);
-        statusText.textContent = '⚠ AI model failed to load. Check your internet connection and try again.';
+        statusText.textContent = '⚠ Error: ' + (err.message || 'AI failed. Open browser console (F12) for details.');
         statusText.style.color = '#EF4444';
         progressBar.style.width = '0%';
     } finally {
