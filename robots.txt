@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Disallow nothing — all content is public
+Disallow:
+
+# Sitemap location
+Sitemap: https://kaynai.co.uk/sitemap.xml
