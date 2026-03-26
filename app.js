@@ -7,6 +7,16 @@ let currentGifBlob = null;
 let ttsUtterance = null;
 let audioChunks = [];
 let mediaRecorder = null;
+let kokoroModel = null; // cached Kokoro TTS model instance
+
+// Kokoro neural TTS — loaded on first use (~82MB, then cached in browser)
+const KOKORO_CDN = 'https://esm.sh/kokoro-js@1.2.0';
+const KOKORO_VOICE_MAP = {
+    'English (US) - Female': 'af_nova',
+    'English (US) - Male':   'am_michael',
+    'English (UK) - Female': 'bf_emma',
+    'English (UK) - Male':   'bm_george',
+};
 
 // Set pdf.js worker path
 if (typeof pdfjsLib !== 'undefined') {
@@ -57,15 +67,20 @@ function openTool(toolName) {
                 <div style="margin-top: 1rem;">
                     <label>Voice:</label>
                     <select id="voice" style="width: 100%; padding: 0.75rem; border: 2px solid #E5E7EB; border-radius: 8px; margin-top: 0.5rem;">
-                        <option>English (US) - Female</option>
-                        <option>English (US) - Male</option>
-                        <option>English (UK) - Female</option>
-                        <option>English (UK) - Male</option>
-                        <option>Spanish - Female</option>
-                        <option>French - Female</option>
-                        <option>German - Male</option>
-                        <option>Japanese - Female</option>
+                        <optgroup label="✨ Neural AI (natural)">
+                            <option value="English (US) - Female">English (US) — Female</option>
+                            <option value="English (US) - Male">English (US) — Male</option>
+                            <option value="English (UK) - Female">English (UK) — Female</option>
+                            <option value="English (UK) - Male">English (UK) — Male</option>
+                        </optgroup>
+                        <optgroup label="Browser voice (other languages)">
+                            <option value="Spanish - Female">Spanish — Female</option>
+                            <option value="French - Female">French — Female</option>
+                            <option value="German - Male">German — Male</option>
+                            <option value="Japanese - Female">Japanese — Female</option>
+                        </optgroup>
                     </select>
+                    <p style="font-size:0.78rem; color:#6B7280; margin-top:0.35rem;">✨ English voices use a neural AI model (~82 MB, cached after first use)</p>
                 </div>
                 <div style="margin-top: 1rem;">
                     <label>Speed: <span id="speedValue">1.0x</span></label>
@@ -442,9 +457,9 @@ function downloadResult() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TEXT TO SPEECH — Web Speech API with audio capture for download
+// TEXT TO SPEECH — Kokoro neural AI (English) + Web Speech API (other languages)
 // ═══════════════════════════════════════════════════════════════════════════════
-function generateSpeech() {
+async function generateSpeech() {
     const text = document.getElementById('ttsText').value.trim();
     if (!text) {
         alert('Please enter some text first!');
@@ -455,51 +470,101 @@ function generateSpeech() {
     const speed = parseFloat(document.getElementById('speed').value);
     const btn = document.querySelector('#modalBody .btn-primary');
 
-    // Stop any previous speech
     window.speechSynthesis.cancel();
     currentTTSBlob = null;
+    document.getElementById('audioResult').style.display = 'none';
+
+    const kokoroVoice = KOKORO_VOICE_MAP[voiceSelect];
+    if (kokoroVoice) {
+        await generateWithKokoro(text, kokoroVoice, speed, btn);
+    } else {
+        generateWithWebSpeech(text, voiceSelect, speed, btn);
+    }
+}
+
+async function generateWithKokoro(text, voice, speed, btn) {
+    const statusEl = document.getElementById('ttsStatus');
+    btn.disabled = true;
+    statusEl.style.display = 'block';
+    statusEl.style.color = '#6366F1';
+    statusEl.textContent = '⏳ Loading neural voice model… (~82 MB, instant on repeat use)';
+
+    try {
+        if (!kokoroModel) {
+            const mod = await import(KOKORO_CDN);
+            const KokoroTTS = mod.default || mod.KokoroTTS;
+            kokoroModel = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-onnx', {
+                dtype: 'q8',
+                progress_callback: (p) => {
+                    if (p.status === 'downloading') {
+                        const pct = p.total ? ((p.loaded / p.total) * 100).toFixed(0) : '…';
+                        statusEl.textContent = `⬇ Downloading neural voice: ${pct}% (${(p.loaded / 1048576).toFixed(1)} MB)`;
+                    } else if (p.status === 'loading') {
+                        statusEl.textContent = '⚙ Initialising voice model…';
+                    }
+                }
+            });
+        }
+
+        statusEl.textContent = '🎤 Synthesising speech…';
+        const output = await kokoroModel.generate(text, { voice, speed: speed || 1.0 });
+
+        const blob = float32ToWav(output.audio, output.sampling_rate);
+        currentTTSBlob = blob;
+        const url = URL.createObjectURL(blob);
+        const audioEl = document.querySelector('#audioResult audio');
+        if (audioEl) audioEl.src = url;
+        document.getElementById('audioResult').style.display = 'block';
+        statusEl.textContent = '✓ Done!';
+        statusEl.style.color = '#10B981';
+        if (audioEl) audioEl.play().catch(() => {});
+        setTimeout(() => { statusEl.style.display = 'none'; statusEl.style.color = ''; }, 3000);
+    } catch (err) {
+        console.error('Kokoro TTS error:', err);
+        kokoroModel = null; // reset so next attempt re-tries loading
+        statusEl.textContent = '⚠ Neural voice unavailable — using browser voice instead';
+        statusEl.style.color = '#F59E0B';
+        setTimeout(() => generateWithWebSpeech(text, 'English (UK) - Female', speed, btn), 200);
+        return;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function generateWithWebSpeech(text, voiceSelect, speed, btn) {
+    const statusEl = document.getElementById('ttsStatus');
+    btn.disabled = true;
+    statusEl.style.display = 'block';
+    statusEl.style.color = '#6366F1';
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = speed;
 
-    // Match selected voice: accent-normalised gender scoring + quality ranking
+    // Accent-normalised gender scoring for non-English languages
     const voices = window.speechSynthesis.getVoices();
     const langMap = {
-        'English (US) - Female': { lang: 'en-US', gender: 'female' },
-        'English (US) - Male':   { lang: 'en-US', gender: 'male' },
-        'English (UK) - Female': { lang: 'en-GB', gender: 'female' },
-        'English (UK) - Male':   { lang: 'en-GB', gender: 'male' },
-        'Spanish - Female':      { lang: 'es',    gender: 'female' },
-        'French - Female':       { lang: 'fr',    gender: 'female' },
-        'German - Male':         { lang: 'de',    gender: 'male' },
-        'Japanese - Female':     { lang: 'ja',    gender: 'female' }
+        'Spanish - Female':  { lang: 'es', gender: 'female' },
+        'French - Female':   { lang: 'fr', gender: 'female' },
+        'German - Male':     { lang: 'de', gender: 'male' },
+        'Japanese - Female': { lang: 'ja', gender: 'female' }
     };
     const deaccent = s => s.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
-    const femaleNames = ['female','woman','girl','zira','hazel','susan','karen',
-        'victoria','samantha','moira','fiona','nicky','aria','jenny','sara','jane',
-        'siri','cortana','elvira','lucia','helena','laura','isabel','carmen',
-        'paloma','pilar','raquel','lola','mia','rosa','sofia','julia','silvia',
-        'beatriz','esther','nuria','ines','monica','paulina','sabina','camila',
-        'conchita','amelie','hortense','anna','lekha','mei-jia','sin-ji','kyoko',
-        'mizuki','yuna','heami','naayf','zeynep','filiz','yelda',
-        'ivy','joanna','kendra','kimberly','salli','nicole','emma','amy',
-        'olivia','kate','tessa','naja','helle','ioana','haruka','ayumi','nanami'];
-    const maleNames = ['male','man','guy','david','mark','george','rishi',
-        'daniel','james','alex','tom','fred','junior','jorge','enrique','diego',
-        'pablo','carlos','antonio','miguel','thomas','otto','yannick','luca',
-        'takeshi','ichiro','kangkang','zhiwei','huihui','matthew','brian','joey'];
+    const femaleNames = ['female','woman','zira','hazel','susan','karen','victoria',
+        'samantha','moira','fiona','nicky','aria','jenny','sara','jane','elvira',
+        'lucia','helena','laura','isabel','carmen','conchita','amelie','anna',
+        'kyoko','mizuki','yuna','heami','ivy','joanna','kendra','kimberly','salli',
+        'nicole','emma','amy','olivia','kate','tessa','haruka','ayumi','nanami'];
+    const maleNames = ['male','man','david','mark','george','rishi','daniel',
+        'james','alex','tom','fred','jorge','enrique','diego','pablo','carlos',
+        'thomas','otto','takeshi','ichiro','matthew','brian','joey'];
 
     const target = langMap[voiceSelect];
     if (target) {
         utterance.lang = target.lang;
-        const langMatch = v => target.lang.includes('-')
-            ? v.lang === target.lang
-            : v.lang.startsWith(target.lang);
         const wantFemale = target.gender === 'female';
         const seekNames = wantFemale ? femaleNames : maleNames;
         const avoidNames = wantFemale ? maleNames : femaleNames;
-        const langVoices = voices.filter(v => langMatch(v));
-        // Score: gender (0=match,1=unknown,2=wrong) × 4  +  quality (0=neural/premium,1=normal)
+        const langVoices = voices.filter(v => v.lang.startsWith(target.lang));
         const scored = langVoices.map(v => {
             const n = deaccent(v.name);
             const quality = /neural|premium|natural|enhanced/i.test(v.name) ? 0 : 1;
@@ -511,25 +576,40 @@ function generateSpeech() {
         if (scored.length > 0) utterance.voice = scored[0].voice;
     }
 
-    utterance.onstart = () => {
-        document.getElementById('ttsStatus').textContent = '🔊 Speaking…';
-        document.getElementById('ttsStatus').style.display = 'block';
-    };
-
+    utterance.onstart = () => { statusEl.textContent = '🔊 Speaking…'; };
     utterance.onend = () => {
-        document.getElementById('ttsStatus').textContent = '✓ Done! Use your browser\'s audio or download below.';
-        document.getElementById('ttsStatus').style.color = '#10B981';
-        // Show a download button that re-speaks and offers a note
+        statusEl.textContent = '✓ Done!';
+        statusEl.style.color = '#10B981';
         document.getElementById('audioResult').style.display = 'block';
-        // Encode to WAV via AudioContext if available
         encodeTextToAudio(text, utterance.voice, speed);
+        btn.disabled = false;
+        setTimeout(() => { statusEl.style.display = 'none'; statusEl.style.color = ''; }, 3000);
     };
-
     utterance.onerror = (e) => {
-        document.getElementById('ttsStatus').textContent = 'Error: ' + e.error;
+        statusEl.textContent = 'Error: ' + e.error;
+        statusEl.style.color = '#EF4444';
+        btn.disabled = false;
     };
 
     window.speechSynthesis.speak(utterance);
+}
+
+function float32ToWav(samples, sampleRate) {
+    const dataSize = samples.length * 2;
+    const buf = new ArrayBuffer(44 + dataSize);
+    const v = new DataView(buf);
+    const w = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + dataSize, true);
+    w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, sampleRate, true);
+    v.setUint32(28, sampleRate * 2, true); v.setUint16(32, 2, true);
+    v.setUint16(34, 16, true); w(36, 'data');
+    v.setUint32(40, dataSize, true);
+    for (let i = 0; i < samples.length; i++) {
+        v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 32767, true);
+    }
+    return new Blob([buf], { type: 'audio/wav' });
 }
 
 function encodeTextToAudio(text, voice, rate) {
@@ -563,9 +643,10 @@ function encodeTextToAudio(text, voice, rate) {
 
 function downloadAudio() {
     if (currentTTSBlob) {
-        triggerDownload(currentTTSBlob, 'speech.webm');
+        // Kokoro produces WAV; Web Speech fallback produces webm
+        const ext = currentTTSBlob.type === 'audio/wav' ? 'wav' : 'webm';
+        triggerDownload(currentTTSBlob, 'speech.' + ext);
     } else {
-        // Fallback: re-speak
         alert('Please generate speech first, then wait for it to finish before downloading.');
     }
 }
