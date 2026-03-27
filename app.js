@@ -1382,7 +1382,7 @@ function revokeConsent() {
 
 function loadAnalytics() {
     // Replace G-XXXXXXXXXX with your Measurement ID from analytics.google.com
-    const GA_ID = 'G-XXXXXXXXXX';
+    const GA_ID = 'G-N6LWN07ZWY';
     if (GA_ID === 'G-XXXXXXXXXX') return; // placeholder — swap ID before deploying
     if (document.querySelector(`script[src*="${GA_ID}"]`)) return; // already loaded
     const s = document.createElement('script');
