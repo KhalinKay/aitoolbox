@@ -1056,17 +1056,9 @@ function pdfToText(file, btn) {
         }
         return Promise.all(pagePromises);
     }).then(pages => {
-        const fullText = pages.join('\n\n--- Page Break ---\n\n');
-        const blob = new Blob([fullText], { type: 'text/plain' });
-        const outName = file.name.replace(/\.pdf$/i, '') + '.txt';
-        triggerDownload(blob, outName);
-        document.getElementById('conversionResult').style.display = 'block';
-        btn.textContent = 'Convert File'; btn.disabled = false;
-        URL.revokeObjectURL(url);
-    }).then(pages => {
         const fullText = pages.join('\n\n--- Page Break ---\n\n').trim();
-        if (fullText.replace(/[\s-]/g, '').length < 20) {
-            // Virtually no text found — likely a scanned PDF, try OCR
+        if (fullText.replace(/[\s\-—|]/g, '').length < 20) {
+            // Virtually no extractable text — scanned or encrypted PDF, try OCR
             ocrPdf(file, btn, url);
         } else {
             const blob = new Blob([fullText], { type: 'text/plain' });
